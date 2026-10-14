@@ -208,6 +208,27 @@ class OAuthFlowTest:
                 urls.append(f"{origin}/.well-known/{name}")
         return urls
 
+    ENDPOINT_KEYS = ("authorization_endpoint", "token_endpoint", "registration_endpoint", "jwks_uri",
+                     "revocation_endpoint", "introspection_endpoint", "userinfo_endpoint", "end_session_endpoint")
+
+    def _rewrite_endpoints(self) -> list[str]:
+        """프록시 뒤 서버가 localhost:9000 같은 내부 주소로 엔드포인트를 광고하면, 호스트만 입력 서버의 것으로 바꾼다.
+        경로는 그대로 두고 issuer 값은 바꾸지 않는다(JWT iss는 서버가 적는 값과 비교해야 하므로)."""
+        if self.args.keep_metadata_endpoints:
+            return []
+        server = urllib.parse.urlparse(self.base)
+        changed = []
+        for key in self.ENDPOINT_KEYS:
+            value = self.metadata.get(key)
+            if not value:
+                continue
+            parsed = urllib.parse.urlparse(value)
+            if (parsed.scheme, parsed.netloc) == (server.scheme, server.netloc):
+                continue
+            self.metadata[key] = urllib.parse.urlunparse((server.scheme, server.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+            changed.append(f"{key}: {parsed.scheme}://{parsed.netloc} → {server.scheme}://{server.netloc}")
+        return changed
+
     def step_metadata(self):
         attempts = []
         for url in self._metadata_candidates():
@@ -234,6 +255,9 @@ class OAuthFlowTest:
         for key in ("issuer", "authorization_endpoint", "token_endpoint"):
             if not self.metadata.get(key):
                 issues.append(f"{key} 없음")
+        rewritten = self._rewrite_endpoints()
+        if rewritten:
+            warnings.append("엔드포인트 호스트를 입력 서버로 바꿈: " + ", ".join(rewritten))
         issuer = (self.metadata.get("issuer") or "").rstrip("/")
         expected = (self.args.issuer or self.base).rstrip("/")
         if issuer and issuer != expected:
@@ -651,6 +675,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resource", help="RFC 8707 resource 값(= MCP 서버 URL). 주면 aud 검사와 보호 자원 호출에 사용")
     parser.add_argument("--metadata-url", help="메타데이터 문서 URL을 직접 지정(기본: /.well-known/oauth-authorization-server, openid-configuration 순서로 탐색)")
     parser.add_argument("--issuer", help="기대하는 issuer 값. 프록시 뒤에서 입력 URL과 issuer가 다를 때 지정")
+    parser.add_argument("--keep-metadata-endpoints", action="store_true",
+                        help="메타데이터의 엔드포인트 주소를 그대로 사용(기본은 localhost 등 다른 호스트를 입력 서버 호스트로 바꿈)")
     parser.add_argument("--redirect-uri", default=DEFAULT_REDIRECT_URI, help=f"등록할 redirect_uri (기본 {DEFAULT_REDIRECT_URI})")
     parser.add_argument("--scope", default=DEFAULT_SCOPE, help=f"요청 scope (기본 '{DEFAULT_SCOPE}')")
     parser.add_argument("--client-id", help="DCR을 건너뛰고 쓸 client_id")
