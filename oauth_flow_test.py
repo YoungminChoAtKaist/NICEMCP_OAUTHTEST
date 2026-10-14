@@ -183,6 +183,7 @@ class OAuthFlowTest:
         self.http = Http(args.insecure, args.timeout)
         self.report = Report()
         self.metadata: dict = {}
+        self.metadata_url: str = ""
         self.jwks: dict = {}
         self.client_id: str | None = args.client_id
         self.client_secret: str | None = args.client_secret
@@ -190,36 +191,66 @@ class OAuthFlowTest:
         self.second_tokens: dict = {}
 
     # -- 1. 메타데이터 --------------------------------------------------------
+    def _metadata_candidates(self) -> list[str]:
+        """RFC 8414: issuer에 경로가 있으면 /.well-known/oauth-authorization-server{path} 와 {path}/.well-known/... 둘 다 시도한다."""
+        if self.args.metadata_url:
+            return [self.args.metadata_url]
+        parsed = urllib.parse.urlparse(self.base)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        path = parsed.path.rstrip("/")
+        names = ("oauth-authorization-server", "openid-configuration")
+        urls = []
+        for name in names:
+            if path:
+                urls.append(f"{origin}/.well-known/{name}{path}")
+                urls.append(f"{origin}{path}/.well-known/{name}")
+            else:
+                urls.append(f"{origin}/.well-known/{name}")
+        return urls
+
     def step_metadata(self):
-        for path in ("/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"):
-            resp = self.http.get(self.base + path, headers={"Accept": "application/json"})
+        attempts = []
+        for url in self._metadata_candidates():
+            resp = self.http.get(url, headers={"Accept": "application/json"})
+            content_type = resp.headers.get("content-type", "")
+            attempts.append(f"{url} → HTTP {resp.status} {content_type.split(';')[0] or ''}".rstrip())
             if resp.status == 200:
                 try:
-                    self.metadata = resp.json() or {}
+                    body = resp.json()
                 except ValueError:
+                    attempts[-1] += f" (JSON 아님: {resp.text[:80]!r})"
                     continue
-                break
+                if isinstance(body, dict) and body.get("token_endpoint"):
+                    self.metadata = body
+                    self.metadata_url = url
+                    break
+                attempts[-1] += " (token_endpoint 없음)"
         if not self.metadata:
-            self.report.add("1. Authorization Server 메타데이터", "FAIL", f"{self.base}/.well-known/oauth-authorization-server 응답 없음")
+            self.report.add("1. Authorization Server 메타데이터", "FAIL",
+                            "메타데이터를 찾지 못함. 시도: " + " | ".join(attempts)
+                            + ". 서버가 다른 경로로 제공하면 --metadata-url 로 지정하세요")
             raise StepFailed
-        issues = []
+        issues, warnings = [], []
         for key in ("issuer", "authorization_endpoint", "token_endpoint"):
             if not self.metadata.get(key):
                 issues.append(f"{key} 없음")
         issuer = (self.metadata.get("issuer") or "").rstrip("/")
-        if issuer and issuer != self.base:
-            issues.append(f"issuer({issuer})가 입력 URL({self.base})과 다름")
+        expected = (self.args.issuer or self.base).rstrip("/")
+        if issuer and issuer != expected:
+            warnings.append(f"issuer({issuer})가 {'--issuer' if self.args.issuer else '입력 URL'}({expected})과 다름 — JWT iss 검사는 메타데이터 issuer 기준")
         if "S256" not in (self.metadata.get("code_challenge_methods_supported") or []):
-            issues.append("PKCE S256 미지원")
+            warnings.append("code_challenge_methods_supported에 S256 없음(PKCE는 그대로 시도)")
         if "authorization_code" not in (self.metadata.get("grant_types_supported") or []):
-            issues.append("authorization_code grant 미지원")
-        detail = (f"issuer={issuer}, token={self.metadata.get('token_endpoint')}, "
+            warnings.append("grant_types_supported에 authorization_code 없음")
+        detail = (f"{self.metadata_url} | issuer={issuer}, authorize={self.metadata.get('authorization_endpoint')}, "
+                  f"token={self.metadata.get('token_endpoint')}, "
                   f"DCR={'있음' if self.metadata.get('registration_endpoint') else '없음'}, "
                   f"revocation={'있음' if self.metadata.get('revocation_endpoint') else '없음'}")
         if issues:
-            self.report.add("1. Authorization Server 메타데이터", "FAIL", "; ".join(issues) + " | " + detail)
+            self.report.add("1. Authorization Server 메타데이터", "FAIL", "; ".join(issues + warnings) + " | " + detail)
             raise StepFailed
-        self.report.add("1. Authorization Server 메타데이터", "PASS", detail)
+        self.report.add("1. Authorization Server 메타데이터", "WARN" if warnings else "PASS",
+                        ("; ".join(warnings) + " | " if warnings else "") + detail)
 
     # -- 2. JWKS ------------------------------------------------------------
     def step_jwks(self):
@@ -591,7 +622,8 @@ class OAuthFlowTest:
         except StepFailed:
             pass
         except (urllib.error.URLError, OSError) as error:
-            self.report.add("연결", "FAIL", f"{error}")
+            hint = " — 자체 서명 인증서면 --insecure, 사내망이면 프록시·DNS 확인" if "CERTIFICATE" in str(error).upper() or "SSL" in str(error).upper() or "resolve" in str(error).lower() else ""
+            self.report.add("연결", "FAIL", f"{error}{hint}")
         return self._summary()
 
     def _summary(self) -> int:
@@ -617,6 +649,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--id", dest="user_id", help="로그인 ID. 없으면 물어봄")
     parser.add_argument("--password-env", default="OAUTH_TEST_PASSWORD", help="비밀번호를 읽을 환경 변수 이름(기본 OAUTH_TEST_PASSWORD). 없으면 숨김 입력")
     parser.add_argument("--resource", help="RFC 8707 resource 값(= MCP 서버 URL). 주면 aud 검사와 보호 자원 호출에 사용")
+    parser.add_argument("--metadata-url", help="메타데이터 문서 URL을 직접 지정(기본: /.well-known/oauth-authorization-server, openid-configuration 순서로 탐색)")
+    parser.add_argument("--issuer", help="기대하는 issuer 값. 프록시 뒤에서 입력 URL과 issuer가 다를 때 지정")
     parser.add_argument("--redirect-uri", default=DEFAULT_REDIRECT_URI, help=f"등록할 redirect_uri (기본 {DEFAULT_REDIRECT_URI})")
     parser.add_argument("--scope", default=DEFAULT_SCOPE, help=f"요청 scope (기본 '{DEFAULT_SCOPE}')")
     parser.add_argument("--client-id", help="DCR을 건너뛰고 쓸 client_id")

@@ -13,6 +13,7 @@ python3 oauth_flow_test.py --server https://auth.example.com --resource https://
   (자동화하려면 `OAUTH_TEST_PASSWORD` 환경 변수, 또는 `--password-env` 로 변수 이름 지정).
 - `--dry-run`: 메타데이터·JWKS·Client 등록·로그인 화면까지만 확인합니다. ID/비밀번호가 필요 없습니다.
 - `--insecure`: 사내 자체 서명 인증서면 TLS 검증을 생략합니다.
+- `--metadata-url`: 메타데이터 문서 경로가 다르면 직접 지정. `--issuer`: 프록시 뒤에서 issuer가 입력 URL과 다를 때 기대값 지정(다르면 1단계는 경고로만 표시).
 - `--client-id`: 이미 등록된 Client로 시험할 때(Dynamic Client Registration 건너뜀).
 - `--no-revoke`: 마지막 Refresh Token 폐기를 건너뜁니다.
 - `--json 결과.json`: 단계별 결과를 파일로 남깁니다. `--save-client`·`--save-tokens` 는 응답을 0600 권한 파일로 저장합니다.
@@ -47,3 +48,5 @@ python3 oauth_flow_test.py --server https://auth.example.com --resource https://
 ## Change log
 - 2026-10-15 (KST) — feat: OAuth flow test CLI (oauth_flow_test.py).
   메타데이터·JWKS·DCR·PKCE 로그인·Token 교환·JWT 검사·Refresh·부정 케이스·보호 자원 호출·Revocation 14단계를 표준 라이브러리만으로 점검하는 첫 버전.
+- 2026-10-15 (KST) — fix: step 1 shows every metadata URL tried with its status, treats issuer mismatch as a warning, adds --metadata-url/--issuer.
+  리팩토링 서버의 `--dry-run` 1단계 실패를 원인별로 구분할 수 있게 했다.
