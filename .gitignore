@@ -1,0 +1,6 @@
+client.json
+token.json
+*.log
+result*.json
+__pycache__/
+.venv/
