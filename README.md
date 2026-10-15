@@ -14,7 +14,7 @@ python3 oauth_flow_test.py --server https://auth.example.com --resource https://
 - `--dry-run`: 메타데이터·JWKS·Client 등록·로그인 화면까지만 확인합니다. ID/비밀번호가 필요 없습니다.
 - `--insecure`: 사내 자체 서명 인증서면 TLS 검증을 생략합니다.
 - `--metadata-url`: 메타데이터 문서 경로가 다르면 직접 지정. `--issuer`: 프록시 뒤에서 issuer가 입력 URL과 다를 때 기대값 지정(다르면 1단계는 경고로만 표시).
-- 메타데이터의 엔드포인트가 `http://localhost:9000/...`처럼 서버 내부 주소면(프록시 뒤 배포) 호스트를 입력한 `--server` 주소로 바꿔 호출합니다. 1단계에 경고로 표시되며 `--keep-metadata-endpoints`로 끌 수 있습니다. issuer 값은 바꾸지 않고 JWT `iss` 검사에 그대로 씁니다.
+- 메타데이터의 엔드포인트가 `http://localhost:9000/...`처럼 localhost·사설망 주소면(프록시 뒤 배포) 호스트를 입력한 `--server` 주소로 바꿔 호출합니다. 공개 호스트(예: MCP origin 메타데이터가 가리키는 실제 OAuth 서버)는 그대로 씁니다. `--rewrite-endpoints`는 전부 바꾸고 `--keep-metadata-endpoints`는 아무것도 바꾸지 않습니다. issuer 값은 바꾸지 않고 JWT `iss` 검사에 그대로 씁니다.
 - `--client-id`: 이미 등록된 Client로 시험할 때(Dynamic Client Registration 건너뜀).
 - `--no-revoke`: 마지막 Refresh Token 폐기를 건너뜁니다.
 - `--json 결과.json`: 단계별 결과를 파일로 남깁니다. `--save-client`·`--save-tokens` 는 응답을 0600 권한 파일로 저장합니다.
@@ -53,3 +53,5 @@ python3 oauth_flow_test.py --server https://auth.example.com --resource https://
   리팩토링 서버의 `--dry-run` 1단계 실패를 원인별로 구분할 수 있게 했다.
 - 2026-10-15 (KST) — fix: rewrite metadata endpoint hosts (e.g. localhost:9000) to the entered server when running from another machine.
   데스크톱에서 사내 서버를 시험할 때 메타데이터가 내부 주소를 광고해도 입력 서버로 호출한다(--keep-metadata-endpoints로 해제).
+- 2026-10-15 (KST) — fix: rewrite only localhost/private endpoint hosts; public hosts advertised by an MCP origin stay as-is (--rewrite-endpoints forces all).
+  MCP origin에 대고 돌릴 때 JWKS가 MCP origin으로 바뀌어 401이 나던 문제를 고쳤다.

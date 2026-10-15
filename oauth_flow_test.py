@@ -211,9 +211,22 @@ class OAuthFlowTest:
     ENDPOINT_KEYS = ("authorization_endpoint", "token_endpoint", "registration_endpoint", "jwks_uri",
                      "revocation_endpoint", "introspection_endpoint", "userinfo_endpoint", "end_session_endpoint")
 
+    @staticmethod
+    def _is_internal_host(netloc: str) -> bool:
+        """localhost·loopback·사설망 주소(다른 기기에서는 닿지 않는 주소)만 내부 주소로 본다."""
+        host = netloc.rsplit("@", 1)[-1].split(":")[0].strip("[]").lower()
+        if host in ("localhost", "0.0.0.0", "::1") or host.endswith(".localhost") or host.endswith(".local"):
+            return True
+        parts = host.split(".")
+        if len(parts) == 4 and all(p.isdigit() for p in parts):
+            a, b = int(parts[0]), int(parts[1])
+            return a in (10, 127) or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
+        return False
+
     def _rewrite_endpoints(self) -> list[str]:
         """프록시 뒤 서버가 localhost:9000 같은 내부 주소로 엔드포인트를 광고하면, 호스트만 입력 서버의 것으로 바꾼다.
-        경로는 그대로 두고 issuer 값은 바꾸지 않는다(JWT iss는 서버가 적는 값과 비교해야 하므로)."""
+        다른 공개 호스트(예: MCP origin 메타데이터가 가리키는 실제 OAuth 서버)는 그대로 쓴다. --rewrite-endpoints 로 전부 바꾸고,
+        --keep-metadata-endpoints 로 아무것도 바꾸지 않는다. 경로는 그대로 두고 issuer 값은 바꾸지 않는다."""
         if self.args.keep_metadata_endpoints:
             return []
         server = urllib.parse.urlparse(self.base)
@@ -224,6 +237,8 @@ class OAuthFlowTest:
                 continue
             parsed = urllib.parse.urlparse(value)
             if (parsed.scheme, parsed.netloc) == (server.scheme, server.netloc):
+                continue
+            if not self.args.rewrite_endpoints and not self._is_internal_host(parsed.netloc):
                 continue
             self.metadata[key] = urllib.parse.urlunparse((server.scheme, server.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
             changed.append(f"{key}: {parsed.scheme}://{parsed.netloc} → {server.scheme}://{server.netloc}")
@@ -676,7 +691,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--metadata-url", help="메타데이터 문서 URL을 직접 지정(기본: /.well-known/oauth-authorization-server, openid-configuration 순서로 탐색)")
     parser.add_argument("--issuer", help="기대하는 issuer 값. 프록시 뒤에서 입력 URL과 issuer가 다를 때 지정")
     parser.add_argument("--keep-metadata-endpoints", action="store_true",
-                        help="메타데이터의 엔드포인트 주소를 그대로 사용(기본은 localhost 등 다른 호스트를 입력 서버 호스트로 바꿈)")
+                        help="메타데이터의 엔드포인트 주소를 그대로 사용(기본은 localhost·사설망 주소만 입력 서버 호스트로 바꿈)")
+    parser.add_argument("--rewrite-endpoints", action="store_true",
+                        help="메타데이터의 엔드포인트 호스트를 전부 입력 서버로 바꿈(MCP origin의 패스스루 경로를 강제로 시험할 때)")
     parser.add_argument("--redirect-uri", default=DEFAULT_REDIRECT_URI, help=f"등록할 redirect_uri (기본 {DEFAULT_REDIRECT_URI})")
     parser.add_argument("--scope", default=DEFAULT_SCOPE, help=f"요청 scope (기본 '{DEFAULT_SCOPE}')")
     parser.add_argument("--client-id", help="DCR을 건너뛰고 쓸 client_id")
