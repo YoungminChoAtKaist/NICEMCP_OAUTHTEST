@@ -192,6 +192,24 @@ class OAuthFlowTest:
         self.client_secret: str | None = args.client_secret
         self.tokens: dict = {}
         self.second_tokens: dict = {}
+        # 실제로 요청에 쓰는 scope. --scope 로 준 값에서 시작해 메타데이터 scopes_supported 와 DCR 응답에 맞춰 조정한다(2026-10-19 invalid_scope).
+        self.scope: str = args.scope
+        self.scope_explicit: bool = args.scope != DEFAULT_SCOPE
+
+    @staticmethod
+    def negotiate_scope(requested: str, supported: list[str] | None, explicit: bool) -> tuple[str, str | None]:
+        """요청 scope 가운데 서버가 지원한다고 알린 것만 남긴다. 하나도 겹치지 않으면 서버 지원 목록을 그대로 쓴다.
+        --scope 를 명시했으면 바꾸지 않고 경고만 돌려준다. 반환: (쓸 scope, 경고 또는 None)."""
+        if not supported:
+            return requested, None
+        wanted = requested.split()
+        missing = [w for w in wanted if w not in supported]
+        if not missing:
+            return requested, None
+        if explicit:
+            return requested, f"scopes_supported에 없는 scope 요청: {' '.join(missing)} (지원: {' '.join(supported)})"
+        kept = [w for w in wanted if w in supported] or list(supported)
+        return " ".join(kept), f"scopes_supported에 맞춰 scope를 '{requested}' → '{' '.join(kept)}'로 조정"
 
     # -- 1. 메타데이터 --------------------------------------------------------
     def _metadata_candidates(self) -> list[str]:
@@ -284,6 +302,9 @@ class OAuthFlowTest:
             warnings.append("code_challenge_methods_supported에 S256 없음(PKCE는 그대로 시도)")
         if "authorization_code" not in (self.metadata.get("grant_types_supported") or []):
             warnings.append("grant_types_supported에 authorization_code 없음")
+        self.scope, scope_note = self.negotiate_scope(self.scope, self.metadata.get("scopes_supported"), self.scope_explicit)
+        if scope_note:
+            warnings.append(scope_note)
         detail = (f"{self.metadata_url} | issuer={issuer}, authorize={self.metadata.get('authorization_endpoint')}, "
                   f"token={self.metadata.get('token_endpoint')}, "
                   f"DCR={'있음' if self.metadata.get('registration_endpoint') else '없음'}, "
@@ -327,6 +348,7 @@ class OAuthFlowTest:
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
+            "scope": self.scope,
         }
         resp = self.http.post_json(url, payload)
         try:
@@ -343,6 +365,11 @@ class OAuthFlowTest:
             issues.append(f"auth_method={body.get('token_endpoint_auth_method')}")
         if self.args.redirect_uri not in (body.get("redirect_uris") or [self.args.redirect_uri]):
             issues.append("redirect_uris 응답에 요청 URI가 없음")
+        registered = (body.get("scope") or "").split()
+        if registered and set(registered) != set(self.scope.split()):
+            # 서버가 요청과 다른 scope로 등록하면 authorize 가 invalid_scope 로 끝나므로 등록된 값으로 이어간다(2026-10-19 사내 서버).
+            issues.append(f"서버가 scope를 '{' '.join(registered)}'로 등록(요청 '{self.scope}') — 이후 단계는 등록된 scope 사용")
+            self.scope = " ".join(registered)
         if self.args.save_client:
             self._save_json(self.args.save_client, body)
         status = "WARN" if issues else "PASS"
@@ -360,7 +387,7 @@ class OAuthFlowTest:
             "response_type": "code",
             "client_id": self.client_id,
             "redirect_uri": self.args.redirect_uri,
-            "scope": self.args.scope,
+            "scope": self.scope,
             "state": state,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
@@ -428,12 +455,16 @@ class OAuthFlowTest:
             location = resp.location or ""
             if location.startswith(self.args.redirect_uri):
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+                # code 값은 가리고 나머지 파라미터(error, error_description, state 등)는 그대로 보여 서버 쪽 원인을 알 수 있게 한다.
+                shown = "&".join(f"{k}={short(v[0]) if k == 'code' else v[0]}" for k, v in query.items()) or "(파라미터 없음)"
                 if query.get("error"):
                     detail = f"로그인 전에 redirect_uri 로 돌려보냄: error={query['error'][0]} {query.get('error_description', [''])[0]}".rstrip()
-                else:
+                elif query.get("code"):
                     detail = "로그인 없이 code를 발급해 redirect_uri 로 돌려보냄(세션 재사용 또는 인증 생략)"
-                self.report.add(step_label, "FAIL", f"HTTP {resp.status}, {detail} — redirect_uri 에는 수신 프로그램이 없으므로 "
-                                                    "따라가면 연결 거부가 납니다. 서버의 authorize 처리(client_id·redirect_uri·scope·resource 검증)를 확인하세요")
+                else:
+                    detail = "로그인 전에 error·code 없이 redirect_uri 로 돌려보냄"
+                self.report.add(step_label, "FAIL", f"HTTP {resp.status}, {detail} | Location 파라미터: {shown} — redirect_uri 에는 수신 프로그램이 "
+                                                    "없으므로 따라가면 연결 거부가 납니다. 서버의 authorize 처리(client_id·redirect_uri·scope·resource 검증)를 확인하세요")
                 raise StepFailed
             if not location:
                 return resp, notes
@@ -507,7 +538,7 @@ class OAuthFlowTest:
         issues = []
         if (body.get("token_type") or "").lower() != "bearer":
             issues.append(f"token_type={body.get('token_type')}")
-        if "offline_access" in self.args.scope.split() and not body.get("refresh_token"):
+        if "offline_access" in self.scope.split() and not body.get("refresh_token"):
             issues.append("refresh_token 없음")
         detail = (f"access_token={short(body['access_token'])}, expires_in={body.get('expires_in')}, "
                   f"refresh_token={'있음' if body.get('refresh_token') else '없음'}, scope={body.get('scope')}")

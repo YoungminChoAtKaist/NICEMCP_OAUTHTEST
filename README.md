@@ -52,6 +52,10 @@ python3 oauth_flow_test.py --server https://auth.example.com --resource https://
 - authorize·login 응답의 Location이 `localhost:9000` 같은 내부 주소면 메타데이터와 같은 규칙으로 호스트만 입력 서버로 바꿔 따라갑니다
   (`--keep-metadata-endpoints`면 바꾸지 않음, `--rewrite-endpoints`면 모든 호스트를 바꿈). 연결 오류 메시지에는 요청 URL이 함께 찍힙니다.
 
+- scope는 `--scope`(기본 `business.read offline_access`)에서 시작해 두 번 조정됩니다. 1단계 메타데이터의 `scopes_supported`에 없는 scope는 빼고(하나도 없으면 서버 목록을 그대로 씀),
+  3단계 DCR 응답의 `scope`가 요청과 다르면 등록된 값으로 이어갑니다. 두 경우 모두 WARN으로 표시합니다. `--scope`를 명시하면 메타데이터 단계에서는 바꾸지 않고 경고만 합니다.
+  사내 서버에서 4단계가 `error=invalid_scope`로 끝난 것은 등록된 클라이언트에 `business.read`가 없었기 때문입니다.
+
 ## Change log
 - 2026-10-15 (KST) — feat: OAuth flow test CLI (oauth_flow_test.py).
   메타데이터·JWKS·DCR·PKCE 로그인·Token 교환·JWT 검사·Refresh·부정 케이스·보호 자원 호출·Revocation 14단계를 표준 라이브러리만으로 점검하는 첫 버전.
@@ -63,3 +67,5 @@ python3 oauth_flow_test.py --server https://auth.example.com --resource https://
   MCP origin에 대고 돌릴 때 JWKS가 MCP origin으로 바뀌어 401이 나던 문제를 고쳤다.
 - 2026-10-19 (KST) — fix: follow authorize redirects manually, stop at redirect_uri and report the server's error, rewrite internal redirect hosts, show the URL in connection errors.
   사내 서버에서 3단계 통과 뒤 `WinError 10061`로 끝나던 것은 서버가 로그인 전에 redirect_uri(127.0.0.1:6274)로 보낸 것을 urllib가 따라간 결과였다. 이제 그 이동은 멈추고 error 파라미터를 4단계 결과로 보여 준다. 단위 테스트 `test_oauth_flow_test.py` 추가.
+- 2026-10-19 (KST) — fix: print every redirect_uri Location parameter on the step 4 failure; negotiate scope with scopes_supported and the DCR response.
+  사내 서버의 `invalid_scope`(요청 scope가 등록 클라이언트에 없음)를 자동으로 피하고 조정 내용을 WARN으로 남긴다. 단위 테스트 3건 추가.
