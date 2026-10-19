@@ -46,6 +46,12 @@ python3 oauth_flow_test.py --server https://auth.example.com --resource https://
 - 동의(consent) 화면이 켜져 있으면 모든 scope에 동의해 제출합니다(Spring Authorization Server 기본 폼 기준).
 - `--expect-claims`로 필수 claim 목록을 바꿀 수 있습니다(기본 `token_use,user_hmac,company_id`).
 
+- 4단계에서 서버가 로그인 화면 대신 `redirect_uri`(기본 `http://127.0.0.1:6274/oauth/callback`)로 바로 302를 보내면, 이 CLI는 따라가지 않고
+  `error`·`error_description`을 4단계 FAIL로 보고합니다. 그 주소에는 수신 프로그램이 없으므로 urllib가 따라가면 `WinError 10061`(연결 거부)만 남습니다.
+  이 경우는 서버의 authorize 처리(client_id·redirect_uri·scope·resource 검증, 또는 로그인 없이 code 발급)를 확인합니다.
+- authorize·login 응답의 Location이 `localhost:9000` 같은 내부 주소면 메타데이터와 같은 규칙으로 호스트만 입력 서버로 바꿔 따라갑니다
+  (`--keep-metadata-endpoints`면 바꾸지 않음, `--rewrite-endpoints`면 모든 호스트를 바꿈). 연결 오류 메시지에는 요청 URL이 함께 찍힙니다.
+
 ## Change log
 - 2026-10-15 (KST) — feat: OAuth flow test CLI (oauth_flow_test.py).
   메타데이터·JWKS·DCR·PKCE 로그인·Token 교환·JWT 검사·Refresh·부정 케이스·보호 자원 호출·Revocation 14단계를 표준 라이브러리만으로 점검하는 첫 버전.
@@ -55,3 +61,5 @@ python3 oauth_flow_test.py --server https://auth.example.com --resource https://
   데스크톱에서 사내 서버를 시험할 때 메타데이터가 내부 주소를 광고해도 입력 서버로 호출한다(--keep-metadata-endpoints로 해제).
 - 2026-10-15 (KST) — fix: rewrite only localhost/private endpoint hosts; public hosts advertised by an MCP origin stay as-is (--rewrite-endpoints forces all).
   MCP origin에 대고 돌릴 때 JWKS가 MCP origin으로 바뀌어 401이 나던 문제를 고쳤다.
+- 2026-10-19 (KST) — fix: follow authorize redirects manually, stop at redirect_uri and report the server's error, rewrite internal redirect hosts, show the URL in connection errors.
+  사내 서버에서 3단계 통과 뒤 `WinError 10061`로 끝나던 것은 서버가 로그인 전에 redirect_uri(127.0.0.1:6274)로 보낸 것을 urllib가 따라간 결과였다. 이제 그 이동은 멈추고 error 파라미터를 4단계 결과로 보여 준다. 단위 테스트 `test_oauth_flow_test.py` 추가.

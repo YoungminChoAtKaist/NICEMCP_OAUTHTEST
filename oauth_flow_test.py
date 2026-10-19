@@ -85,6 +85,9 @@ class Http:
         except urllib.error.HTTPError as error:
             body = error.read()
             return Response(error.code, {k.lower(): v for k, v in error.headers.items()}, body, url)
+        except urllib.error.URLError as error:
+            # 어느 주소로 가다 막혔는지 없으면 원인을 찾기 어렵다(2026-10-19: 리다이렉트를 따라가다 127.0.0.1:6274 연결 거부).
+            raise urllib.error.URLError(f"{error.reason} — 요청 URL {url}") from error
 
     def get(self, url: str, **kw) -> Response:
         return self.request("GET", url, **kw)
@@ -400,20 +403,63 @@ class OAuthFlowTest:
         match = re.search(r'name="_csrf"[^>]*value="([^"]*)"', page) or re.search(r'value="([^"]*)"[^>]*name="_csrf"', page)
         return html.unescape(match.group(1)) if match else None
 
+    def _resolve_redirect(self, base_url: str, location: str) -> tuple[str, str | None]:
+        """Location을 절대 URL로 만들고, 프록시 뒤 서버가 localhost:9000 같은 내부 주소로 보내면 호스트만 입력 서버로 바꾼다.
+        redirect_uri 로 가는 이동은 바꾸지 않는다. 반환: (이동할 URL, 보정 메모 또는 None)."""
+        target = urllib.parse.urljoin(base_url, location)
+        parsed = urllib.parse.urlparse(target)
+        server = urllib.parse.urlparse(self.base)
+        if (not parsed.netloc or (parsed.scheme, parsed.netloc) == (server.scheme, server.netloc)
+                or target.startswith(self.args.redirect_uri) or self.args.keep_metadata_endpoints
+                or not (self.args.rewrite_endpoints or self._is_internal_host(parsed.netloc))):
+            return target, None
+        rewritten = urllib.parse.urlunparse((server.scheme, server.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+        return rewritten, f"{parsed.scheme}://{parsed.netloc} → {server.scheme}://{server.netloc}"
+
+    def _open_login_page(self, url: str, step_label: str) -> tuple[Response, list[str]]:
+        """authorize 요청의 리다이렉트를 직접 따라가 로그인 화면(200)까지 연다. urllib가 자동으로 따라가면
+        서버가 로그인 전에 redirect_uri(기본 127.0.0.1:6274, 수신 프로그램 없음)로 보낼 때 WinError 10061 같은 연결 거부만
+        남고 서버가 보낸 error 파라미터를 볼 수 없으므로, redirect_uri 로의 이동은 여기서 멈추고 내용을 보고한다."""
+        notes: list[str] = []
+        for _ in range(6):
+            resp = self.http.get(url, follow_redirects=False)
+            if resp.status not in (301, 302, 303, 307, 308):
+                return resp, notes
+            location = resp.location or ""
+            if location.startswith(self.args.redirect_uri):
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+                if query.get("error"):
+                    detail = f"로그인 전에 redirect_uri 로 돌려보냄: error={query['error'][0]} {query.get('error_description', [''])[0]}".rstrip()
+                else:
+                    detail = "로그인 없이 code를 발급해 redirect_uri 로 돌려보냄(세션 재사용 또는 인증 생략)"
+                self.report.add(step_label, "FAIL", f"HTTP {resp.status}, {detail} — redirect_uri 에는 수신 프로그램이 없으므로 "
+                                                    "따라가면 연결 거부가 납니다. 서버의 authorize 처리(client_id·redirect_uri·scope·resource 검증)를 확인하세요")
+                raise StepFailed
+            if not location:
+                return resp, notes
+            url, note = self._resolve_redirect(url, location)
+            if note:
+                notes.append(note)
+        self.report.add(step_label, "FAIL", "리다이렉트가 6회를 넘어 로그인 화면에 닿지 못함")
+        raise StepFailed
+
     def step_login_and_code(self, username: str, password: str) -> tuple[str, str]:
         verifier, challenge, state = self._pkce()
-        resp = self.http.get(self._authorize_url(challenge, state))
+        label = "4. Authorization 요청 → 로그인 화면"
+        resp, notes = self._open_login_page(self._authorize_url(challenge, state), label)
         page = resp.text
         has_form = 'name="username"' in page and 'name="password"' in page
         if resp.status != 200 or not has_form:
-            self.report.add("4. Authorization 요청 → 로그인 화면", "FAIL",
-                            f"HTTP {resp.status}, 최종 URL {resp.url[:80]}, 로그인 폼 {'있음' if has_form else '없음'}")
+            self.report.add(label, "FAIL", f"HTTP {resp.status}, 최종 URL {resp.url[:80]}, 로그인 폼 {'있음' if has_form else '없음'}")
             raise StepFailed
         csrf = self._csrf(page)
         login_action = re.search(r'<form[^>]*id="login-form"[^>]*action="([^"]+)"', page)
         login_url = urllib.parse.urljoin(resp.url, html.unescape(login_action.group(1))) if login_action else self.base + "/login"
-        self.report.add("4. Authorization 요청 → 로그인 화면", "PASS",
-                        f"로그인 폼 확인, CSRF {'있음' if csrf else '없음'}, action={urllib.parse.urlparse(login_url).path}")
+        login_url, note = self._resolve_redirect(resp.url, login_url)
+        if note:
+            notes.append(note)
+        self.report.add(label, "PASS", f"로그인 폼 확인, CSRF {'있음' if csrf else '없음'}, action={urllib.parse.urlparse(login_url).path}"
+                        + (f" | 내부 주소 보정: {'; '.join(notes)}" if notes else ""))
 
         fields = {"username": username, "password": password}
         if csrf:
@@ -426,7 +472,7 @@ class OAuthFlowTest:
             raise StepFailed
         self.report.add("5. 로그인 (ID/비밀번호)", "PASS", f"HTTP {resp.status} → {urllib.parse.urlparse(location).path or location[:60]}")
 
-        next_url = urllib.parse.urljoin(login_url, location)
+        next_url, _ = self._resolve_redirect(login_url, location)
         resp = self.http.get(next_url, follow_redirects=False)
         resp = self._handle_consent(resp, state)
         try:
@@ -644,10 +690,12 @@ class OAuthFlowTest:
             self.step_register()
             if self.args.dry_run:
                 verifier, challenge, state = self._pkce()
-                resp = self.http.get(self._authorize_url(challenge, state))
+                label = "4. Authorization 요청 → 로그인 화면"
+                resp, notes = self._open_login_page(self._authorize_url(challenge, state), label)
                 has_form = 'name="username"' in resp.text and 'name="password"' in resp.text
-                self.report.add("4. Authorization 요청 → 로그인 화면", "PASS" if (resp.status == 200 and has_form) else "FAIL",
-                                f"HTTP {resp.status}, 로그인 폼 {'있음' if has_form else '없음'}, CSRF {'있음' if self._csrf(resp.text) else '없음'}")
+                self.report.add(label, "PASS" if (resp.status == 200 and has_form) else "FAIL",
+                                f"HTTP {resp.status}, 로그인 폼 {'있음' if has_form else '없음'}, CSRF {'있음' if self._csrf(resp.text) else '없음'}"
+                                + (f" | 내부 주소 보정: {'; '.join(notes)}" if notes else ""))
                 self.report.add("5~14", "SKIP", "--dry-run: 로그인 이후 단계는 실행하지 않음")
             else:
                 code, verifier = self.step_login_and_code(username or "", password or "")
